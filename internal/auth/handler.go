@@ -9,14 +9,17 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/thealienbit/authservicebyalien/internal/email"
 )
 
 type Handler struct {
 	DB *pgxpool.Pool
+	JWTIssuer *JWTIssuer
+	Email email.EmailSender
 }
 
-func NewHandler(db *pgxpool.Pool) *Handler {
-	return &Handler{DB: db}
+func NewHandler(db *pgxpool.Pool, jwtIssuer *JWTIssuer, emailSender email.EmailSender) *Handler {
+	return &Handler{DB: db, JWTIssuer: jwtIssuer, Email: emailSender}
 }
 
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +102,12 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: send email (stub)
 	println("EMAIL VERIFICATION TOKEN:", token)
+
+	link := "https://yourapp.com/reset-password?token=" + token
+	subject, body := email.VerificationEmail(link)
+
+	err = h.Email.Send(req.Email, subject, body)
+
 
 	if err := tx.Commit(ctx); err != nil {
 		http.Error(w, "Internal Error", http.StatusInternalServerError)

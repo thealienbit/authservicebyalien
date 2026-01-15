@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	emailInt "github.com/thealienbit/authservicebyalien/internal/email"
 )
 
 func (h *Handler) ResendVerification(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +86,11 @@ func (h *Handler) ResendVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: send email
-	println("RESEND EMAIL VERIFICATION TOKEN:", token)
+	link := "https://yourapp.com/verify?token=" + token
+	subject, body := emailInt.VerificationEmail(link)  
+
+	_ = h.Email.Send(email, subject, body)
+
 
 	w.WriteHeader(http.StatusAccepted)
 	w.Write([]byte(genericResendMessage()))

@@ -23,3 +23,9 @@ password_credentials
 Do everything in one DB transaction
 Return generic success (no email enumeration)
 Email sending will be stubbed for now.
+
+Later we can move keys to:
+KMS
+HSM
+Vault
+
