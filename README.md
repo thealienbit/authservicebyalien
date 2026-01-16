@@ -89,56 +89,71 @@ POST /auth/v1/register
   "email": "user@example.com",
   "password": "StrongPassword123!"
 }
+```
 Response
+```json
 {
   "message": "Registration successful. Please verify your email."
 }
+```
 
 ### Verify Email
 POST /auth/v1/email/verify
+```json
 {
   "token": "verification-token"
 }
+```
 
 ### Resend Verification Email
 POST /auth/v1/email/resend
+```json
 {
   "email": "user@example.com"
 }
+```
 
 ### Login
 POST /auth/v1/login
+```json
 {
   "email": "user@example.com",
   "password": "StrongPassword123!"
 }
+```
 Response
+```json
 {
   "access_token": "jwt",
   "refresh_token": "opaque",
   "expires_in": 900
 }
-
+```
 
 ### Refresh Token 
 POST /auth/v1/token/refresh
+```json
 {
   "refresh_token": "opaque"
 }
+```
 
 ### Forgot Password
+```json
 POST /auth/v1/password/forgot
 {
   "email": "user@example.com"
 }
+```
 
 ### Reset Password
 POST /auth/v1/password/reset
+```json
 {
   "token": "reset-token",
   "new_password": "NewStrongPass123!"
 }
-
+```
 ### JWKS (Public Key Discovery)
 GET /auth/v1/.well-known/jwks.json
 Used by other services to verify JWT signatures.
@@ -153,12 +168,14 @@ Authorization: Bearer <access_token>
 ### Logout (Single Session)
 Uses refresh tojen (JWT not required)
 POST /auth/v1/logout
+```json
 {
   "refresh_token": "opaque"
 }
-
+```
 
 ## JWT Claims
+```json
 {
   "sub": "user_id",
   "iss": "auth-service",
@@ -168,7 +185,7 @@ POST /auth/v1/logout
   "iat": 1234567890,
   "exp": 1234569999
 }
-
+```
 
 ## How Other Applications Integrate
 1. Login via Auth Service
