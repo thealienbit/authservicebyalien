@@ -38,7 +38,7 @@ func main() {
 		587,
 		os.Getenv("SMTP_USER"),
 		os.Getenv("SMTP_PASS"),
-		"no-reply@yourapp.com",
+		os.Getenv("FROM_EMAIL"),
 	)
 
 

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -106,8 +107,9 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	link := "https://yourapp.com/reset-password?token=" + token
 	subject, body := email.VerificationEmail(link)
 
-	err = h.Email.Send(req.Email, subject, body)
-
+	if err := h.Email.Send(req.Email, subject, body); err != nil {
+		log.Printf("Email send failed: %v", err)
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
