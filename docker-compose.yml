@@ -1,0 +1,72 @@
+services:
+  authbyaliendb:
+    image: postgres:16-alpine
+    container_name: authbyaliendb
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: auth_db
+      POSTGRES_USER: auth_user
+      POSTGRES_PASSWORD: auth_password
+
+    ports:
+      - "5430:5432" # LOCAL DEV ONLY — remove in prod
+
+    volumes:
+      - authbyaliendb_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auth-service
+    restart: unless-stopped
+
+    depends_on:
+      authbyaliendb:
+        condition: service_healthy
+
+    environment:
+      APP_ENV: development
+      HTTP_PORT: 8080
+
+      DATABASE_URL: postgres://auth_user:auth_password@authbyaliendb:5432/auth_db?sslmode=disable
+
+      # SMTP (local dev)
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: 587
+      SMTP_USER: your@gmail.com
+      SMTP_PASS: your_app_password
+      SMTP_FROM: your@gmail.com
+
+    ports:
+      - "8082:8080" # expose auth API locally
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  adminer:
+    image: adminer
+    container_name: auth-adminer
+    restart: always
+
+    ports:
+      - "8080:8080"
+
+    depends_on:
+      authbyaliendb:
+        condition: service_healthy
+
+volumes:
+  authbyaliendb_data:
+
