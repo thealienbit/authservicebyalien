@@ -13,6 +13,12 @@ import (
 )
 
 func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	app, ok := AppFromContext(r.Context())
+	if !ok {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	var req ForgotPasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusAccepted)
@@ -41,9 +47,10 @@ func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		FROM users u
 		JOIN user_emails ue ON ue.user_id = u.id
 		WHERE ue.email = $1
+		  AND ue.app_id = $2
 		  AND ue.is_primary = true
 		  AND u.status = 'ACTIVE'
-	`, email).Scan(&userID)
+	`, email, app.ID).Scan(&userID)
 
 	if err == pgx.ErrNoRows {
 		// Email does not exist → return generic success
@@ -87,8 +94,8 @@ func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 
-	link := "https://yourapp.com/verify?token=" + plain
-	subject, body := emailInt.PasswordResetEmail(link)  
+	link := tokenLink(app.BaseURL, "/reset-password", plain)
+	subject, body := emailInt.PasswordResetEmail(link)
 	_ = h.Email.Send(email, subject, body)
 
 	w.WriteHeader(http.StatusAccepted)

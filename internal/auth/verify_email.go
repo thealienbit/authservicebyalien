@@ -12,6 +12,12 @@ import (
 )
 
 func (h *Handler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
+	app, ok := AppFromContext(r.Context())
+	if !ok {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	var req VerifyEmailRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -38,13 +44,15 @@ func (h *Handler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 
 	var emailID string
 	err = tx.QueryRow(ctx, `
-		SELECT email_id
-		FROM email_verification_tokens
-		WHERE token_hash = $1
-		  AND used_at IS NULL
-		  AND expires_at > now()
-		FOR UPDATE
-	`, tokenHash).Scan(&emailID)
+		SELECT ev.email_id
+		FROM email_verification_tokens ev
+		JOIN user_emails ue ON ue.id = ev.email_id
+		WHERE ev.token_hash = $1
+		  AND ue.app_id = $2
+		  AND ev.used_at IS NULL
+		  AND ev.expires_at > now()
+		FOR UPDATE OF ev
+	`, tokenHash, app.ID).Scan(&emailID)
 
 	if err == pgx.ErrNoRows {
 		http.Error(w, genericVerifyMessage(), http.StatusOK)

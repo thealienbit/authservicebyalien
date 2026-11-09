@@ -11,19 +11,27 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thealienbit/authservicebyalien/internal/email"
+	"github.com/thealienbit/authservicebyalien/internal/store"
 )
 
 type Handler struct {
-	DB *pgxpool.Pool
+	DB        *pgxpool.Pool
 	JWTIssuer *JWTIssuer
-	Email email.EmailSender
+	Email     email.EmailSender
+	Store     *store.Store
 }
 
-func NewHandler(db *pgxpool.Pool, jwtIssuer *JWTIssuer, emailSender email.EmailSender) *Handler {
-	return &Handler{DB: db, JWTIssuer: jwtIssuer, Email: emailSender}
+func NewHandler(db *pgxpool.Pool, jwtIssuer *JWTIssuer, emailSender email.EmailSender, appStore *store.Store) *Handler {
+	return &Handler{DB: db, JWTIssuer: jwtIssuer, Email: emailSender, Store: appStore}
 }
 
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
+	app, ok := AppFromContext(r.Context())
+	if !ok {
+		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		return
+	}
+
 	var req RegisterRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -58,9 +66,9 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	emailID := uuid.New()
 
 	_, err = tx.Exec(ctx, `
-		INSERT INTO users (id, status)
-		VALUES ($1, 'ACTIVE')
-	`, userID)
+		INSERT INTO users (id, status, app_id)
+		VALUES ($1, 'ACTIVE', $2)
+	`, userID, app.ID)
 	if err != nil {
 		// when user already exists and trying to register (ask to verify email)
 		http.Error(w, genericRegisterMessage(), http.StatusAccepted)
@@ -68,9 +76,9 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err = tx.Exec(ctx, `
-		INSERT INTO user_emails (id, user_id, email)
-		VALUES ($1, $2, $3)
-	`, emailID, userID, req.Email)
+		INSERT INTO user_emails (id, user_id, email, app_id)
+		VALUES ($1, $2, $3, $4)
+	`, emailID, userID, req.Email, app.ID)
 	if err != nil {
 		http.Error(w, genericRegisterMessage(), http.StatusAccepted)
 		return
@@ -101,19 +109,16 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: send email (stub)
-	println("EMAIL VERIFICATION TOKEN:", token)
+	if err := tx.Commit(ctx); err != nil {
+		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		return
+	}
 
-	link := "https://yourapp.com/reset-password?token=" + token
+	link := tokenLink(app.BaseURL, "/verify", token)
 	subject, body := email.VerificationEmail(link)
 
 	if err := h.Email.Send(req.Email, subject, body); err != nil {
 		log.Printf("Email send failed: %v", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		http.Error(w, "Internal Error", http.StatusInternalServerError)
-		return
 	}
 
 	resp := RegisterResponse{

@@ -48,13 +48,11 @@ func VerifyPassword(password, stored string) bool {
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[0])
 	if err != nil {
-		println("err here", err)
-		return false;
+		return false
 	}
 
 	expectedHash, err := base64.RawStdEncoding.DecodeString(parts[1])
 	if err != nil {
-		println("err here1", err)
 		return false
 	}
 
@@ -67,9 +65,5 @@ func VerifyPassword(password, stored string) bool {
 		uint32(len(expectedHash)),
 	)
 
-
-	var res = subtle.ConstantTimeCompare(hash, expectedHash) == 1
-	println("Comp res")
-	println(res)
-	return res
+	return subtle.ConstantTimeCompare(hash, expectedHash) == 1
 }

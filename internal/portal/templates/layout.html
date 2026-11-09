@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{block "title" .}}Auth Admin{{end}}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 0; }
+    header { display: flex; gap: 1rem; align-items: center; padding: 1rem 1.5rem; border-bottom: 1px solid #8884; }
+    header .spacer { flex: 1; }
+    header form { margin: 0; }
+    main { max-width: 60rem; margin: 2rem auto; padding: 0 1.5rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #8884; }
+    form.inline { display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
+    label { display: flex; flex-direction: column; gap: .25rem; }
+    .error { color: #c00; }
+    code.key { display: block; padding: .75rem; background: #8882; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Auth Admin</strong>
+    <span class="spacer"></span>
+    {{if .Email}}
+      <span>{{.Email}}</span>
+      <form method="post" action="/portal/logout">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button type="submit">Log out</button>
+      </form>
+    {{end}}
+  </header>
+  <main>
+    {{template "content" .}}
+  </main>
+</body>
+</html>

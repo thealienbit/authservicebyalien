@@ -1,6 +1,7 @@
 package http
 
 import (
+	"net"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -8,45 +9,67 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	authHandler "github.com/thealienbit/authservicebyalien/internal/auth"
-	"github.com/thealienbit/authservicebyalien/internal/health"
-
 	"github.com/thealienbit/authservicebyalien/internal/email"
+	"github.com/thealienbit/authservicebyalien/internal/health"
+	"github.com/thealienbit/authservicebyalien/internal/portal"
+	"github.com/thealienbit/authservicebyalien/internal/signing"
+	"github.com/thealienbit/authservicebyalien/internal/store"
 )
 
-func NewRouter(db *pgxpool.Pool, jwtIssuer *authHandler.JWTIssuer, signingKeys []*authHandler.SigningKey, emailSender email.EmailSender, 
-) http.Handler {
+type Deps struct {
+	DB             *pgxpool.Pool
+	JWTIssuer      *authHandler.JWTIssuer
+	SigningKeys    []*signing.Key
+	EmailSender    email.EmailSender
+	Store          *store.Store
+	TrustedProxies []*net.IPNet
+	SecureCookies  bool
+}
+
+func NewRouter(deps Deps) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// middleware.RealIP is intentionally not used: it trusts X-Forwarded-For
+	// unconditionally. ClientIP handles it against the trusted proxy list.
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(RateLimitMiddleware(GlobalLimiter))
 
-	// Health check (no auth)
-	r.Get("/health", health.Handler)
+	ipKey := func(r *http.Request) string {
+		return ClientIP(r, deps.TrustedProxies)
+	}
+	appIPKey := func(r *http.Request) string {
+		app, ok := authHandler.AppFromContext(r.Context())
+		if !ok {
+			return ipKey(r)
+		}
+		return app.ID.String() + "|" + ipKey(r)
+	}
 
-	// JWKS (PUBLIC, no auth)
-	r.Get(
-		"/auth/v1/.well-known/jwks.json",
-		authHandler.JWKSHandler(signingKeys),
-	)
+	// Public routes: no app key.
+	r.Group(func(r chi.Router) {
+		r.Use(RateLimitMiddleware(GlobalLimiter, ipKey))
+		r.Get("/health", health.Handler)
+		r.Get("/auth/v1/.well-known/jwks.json", authHandler.JWKSHandler(deps.SigningKeys))
+	})
 
-	auth := authHandler.NewHandler(db, jwtIssuer, emailSender)
-
+	auth := authHandler.NewHandler(deps.DB, deps.JWTIssuer, deps.EmailSender, deps.Store)
 
 	verifier := authHandler.NewJWTVerifier(
-	"auth-service",
-	"your-app",
-	signingKeys,
-)
+		"auth-service",
+		"",
+		deps.SigningKeys,
+	)
 
-
+	// App-to-auth endpoints: every one requires a valid X-App-Key.
 	r.Route("/auth/v1", func(r chi.Router) {
-		r.With(RateLimitMiddleware(RegisterLimiter)).Post("/register", auth.Register)
-		r.With(RateLimitMiddleware(EmailLimiter)).Post("/email/verify", auth.VerifyEmail)
-		r.With(RateLimitMiddleware(EmailLimiter)).Post("/email/resend", auth.ResendVerification)
-		r.With(RateLimitMiddleware(LoginLimiter)).Post("/login", auth.Login)
+		r.Use(AppKeyMiddleware(deps.Store))
+		r.Use(RateLimitMiddleware(GlobalLimiter, appIPKey))
+
+		r.With(RateLimitMiddleware(RegisterLimiter, appIPKey)).Post("/register", auth.Register)
+		r.With(RateLimitMiddleware(EmailLimiter, appIPKey)).Post("/email/verify", auth.VerifyEmail)
+		r.With(RateLimitMiddleware(EmailLimiter, appIPKey)).Post("/email/resend", auth.ResendVerification)
+		r.With(RateLimitMiddleware(LoginLimiter, appIPKey)).Post("/login", auth.Login)
 		r.Post("/token/refresh", auth.RefreshToken)
 		r.Post("/logout", auth.Logout)
 		r.Post("/password/forgot", auth.ForgotPassword)
@@ -56,6 +79,18 @@ func NewRouter(db *pgxpool.Pool, jwtIssuer *authHandler.JWTIssuer, signingKeys [
 			r.Use(authHandler.JWTMiddleware(verifier))
 			r.Post("/logout/all", auth.LogoutAll)
 		})
+	})
+
+	portalHandler := portal.New(portal.Deps{
+		Store:           deps.Store,
+		SecureCookies:   deps.SecureCookies,
+		ClientIP:        ipKey,
+		LoginMiddleware: RateLimitMiddleware(LoginLimiter, ipKey),
+	})
+
+	r.Route("/portal", func(r chi.Router) {
+		r.Use(RateLimitMiddleware(GlobalLimiter, ipKey))
+		portalHandler.Register(r)
 	})
 
 	return r

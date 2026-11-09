@@ -1,0 +1,33 @@
+{{define "title"}}{{.App.Name}} · Organizations{{end}}
+
+{{define "content"}}
+<p><a href="/portal/">← Apps</a></p>
+<h1>{{.App.Name}} — Organizations</h1>
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+<table>
+  <thead>
+    <tr><th>Name</th><th>Status</th><th></th></tr>
+  </thead>
+  <tbody>
+    {{range .Orgs}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td>{{.Status}}</td>
+        <td><a href="/portal/orgs/{{.ID}}/users">Users</a></td>
+      </tr>
+    {{else}}
+      <tr><td colspan="3">No organizations yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+
+<h2>Create organization</h2>
+<form method="post" action="/portal/apps/{{.App.ID}}/orgs" class="inline">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>Name
+    <input name="name" required>
+  </label>
+  <button type="submit">Create organization</button>
+</form>
+{{end}}

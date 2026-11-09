@@ -14,7 +14,6 @@ services:
 
     volumes:
       - authbyaliendb_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
@@ -38,6 +37,9 @@ services:
       HTTP_PORT: 8080
 
       DATABASE_URL: postgres://auth_user:auth_password@authbyaliendb:5432/auth_db?sslmode=disable
+
+      # LOCAL DEV ONLY — encrypts signing keys at rest. Generate your own in prod.
+      JWT_KEK: cpWLKqj6QUQZhO3cdXf7XFDn7iampyYI1E+LB3cVJ5s=
 
       # SMTP (local dev)
       SMTP_HOST: smtp.gmail.com

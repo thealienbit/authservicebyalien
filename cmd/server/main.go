@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/thealienbit/authservicebyalien/internal/auth"
 	"github.com/thealienbit/authservicebyalien/internal/config"
 	"github.com/thealienbit/authservicebyalien/internal/db"
+	"github.com/thealienbit/authservicebyalien/internal/signing"
+	"github.com/thealienbit/authservicebyalien/internal/store"
+	"github.com/thealienbit/authservicebyalien/migrations"
 
 	emailInt "github.com/thealienbit/authservicebyalien/internal/email"
 	httpRouter "github.com/thealienbit/authservicebyalien/internal/http"
@@ -19,31 +22,64 @@ func main() {
 	dbPool := db.NewPostgresPool(cfg.DatabaseURL)
 	defer dbPool.Close()
 
-	key, err := auth.GenerateRSAKey("auth-key-1")
+	ctx := context.Background()
+
+	if err := migrations.Run(ctx, dbPool); err != nil {
+		log.Fatalf("migrations: %v", err)
+	}
+
+	keyCipher, err := signing.NewCipher(cfg.JWTKEK)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	appStore := store.New(dbPool, keyCipher)
+	if _, err := appStore.EnsureSigningKey(ctx); err != nil {
+		log.Fatalf("signing key: %v", err)
+	}
+
+	signingKeys, err := appStore.LoadSigningKeys(ctx)
+	if err != nil {
+		log.Fatalf("signing keys: %v", err)
+	}
+
+	activeKey := signing.Active(signingKeys)
+	if activeKey == nil {
+		log.Fatal("signing keys: no active key")
+	}
+
 	jwtIssuer, err := auth.NewJWTIssuer(
 		"auth-service",
-		"your-app",
-		key,
+		activeKey,
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	emailSender := emailInt.NewSMTPSender(
-		"smtp.gmail.com",
-		587,
-		os.Getenv("SMTP_USER"),
-		os.Getenv("SMTP_PASS"),
-		os.Getenv("FROM_EMAIL"),
+		cfg.SMTPHost,
+		cfg.SMTPPort,
+		cfg.SMTPUser,
+		cfg.SMTPPass,
+		cfg.SMTPFrom,
 	)
 
 
 
-	router := httpRouter.NewRouter(dbPool, jwtIssuer, []*auth.SigningKey{key}, emailSender)
+	trustedProxies, err := httpRouter.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	router := httpRouter.NewRouter(httpRouter.Deps{
+		DB:             dbPool,
+		JWTIssuer:      jwtIssuer,
+		SigningKeys:    signingKeys,
+		EmailSender:    emailSender,
+		Store:          appStore,
+		TrustedProxies: trustedProxies,
+		SecureCookies:  cfg.AppEnv != "development",
+	})
 
 	log.Printf("auth service starting on :%s\n", cfg.HTTPPort)
 	log.Fatal(http.ListenAndServe(":"+cfg.HTTPPort, router))

@@ -13,6 +13,12 @@ import (
 )
 
 func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	app, ok := AppFromContext(r.Context())
+	if !ok {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	var req ResetPasswordRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
@@ -39,13 +45,15 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 
 	var userID uuid.UUID
 	err = tx.QueryRow(ctx, `
-		SELECT user_id
-		FROM password_reset_tokens
-		WHERE token_hash = $1
-		  AND used_at IS NULL
-		  AND expires_at > now()
-		FOR UPDATE
-	`, tokenHash).Scan(&userID)
+		SELECT prt.user_id
+		FROM password_reset_tokens prt
+		JOIN users u ON u.id = prt.user_id
+		WHERE prt.token_hash = $1
+		  AND u.app_id = $2
+		  AND prt.used_at IS NULL
+		  AND prt.expires_at > now()
+		FOR UPDATE OF prt
+	`, tokenHash, app.ID).Scan(&userID)
 
 	if err == pgx.ErrNoRows {
 		http.Error(w, "invalid token", http.StatusUnauthorized)

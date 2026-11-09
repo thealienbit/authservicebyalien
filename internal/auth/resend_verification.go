@@ -13,6 +13,12 @@ import (
 )
 
 func (h *Handler) ResendVerification(w http.ResponseWriter, r *http.Request) {
+	app, ok := AppFromContext(r.Context())
+	if !ok {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	var req ResendVerificationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, genericResendMessage(), http.StatusAccepted)
@@ -40,10 +46,11 @@ func (h *Handler) ResendVerification(w http.ResponseWriter, r *http.Request) {
 		SELECT id
 		FROM user_emails
 		WHERE email = $1
+		  AND app_id = $2
 		  AND is_verified = false
 		  AND is_primary = true
 		FOR UPDATE
-	`, email).Scan(&emailID)
+	`, email, app.ID).Scan(&emailID)
 
 	if err == pgx.ErrNoRows {
 		// Email does not exist or already verified — do nothing
@@ -86,8 +93,8 @@ func (h *Handler) ResendVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	link := "https://yourapp.com/verify?token=" + token
-	subject, body := emailInt.VerificationEmail(link)  
+	link := tokenLink(app.BaseURL, "/verify", token)
+	subject, body := emailInt.VerificationEmail(link)
 
 	_ = h.Email.Send(email, subject, body)
 

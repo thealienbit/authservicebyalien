@@ -10,9 +10,17 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/thealienbit/authservicebyalien/internal/store"
 )
 
 func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
+	app, ok := AppFromContext(r.Context())
+	if !ok {
+		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		return
+	}
+
 	var req RefreshTokenRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -24,11 +32,11 @@ func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
-	
+
 	sum := sha256.Sum256([]byte(req.RefreshToken))
 	tokenHash := base64.RawURLEncoding.EncodeToString(sum[:])
 
-	ctx, cancel := context.WithTimeout(r.Context(), 5 * time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
 	tx, err := h.DB.Begin(ctx)
@@ -40,20 +48,25 @@ func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		refreshID uuid.UUID
-		userID uuid.UUID
-		email string
-		verified bool
+		userID    uuid.UUID
+		appID     uuid.UUID
+		orgID     uuid.UUID
+		email     string
+		verified  bool
+		role      string
 		expiresAt time.Time
 		revokedAt *time.Time
 	)
 
 	err = tx.QueryRow(ctx, `
 		SELECT rt.id, rt.user_id, rt.expires_at, rt.revoked_at,
-		       ue.email, ue.is_verified
+		       ue.email, ue.is_verified, u.app_id, m.organization_id, m.role
 		FROM refresh_tokens rt
+		JOIN users u ON u.id = rt.user_id
 		JOIN user_emails ue ON ue.user_id = rt.user_id AND ue.is_primary = true
+		JOIN memberships m ON m.user_id = rt.user_id
 		WHERE rt.token_hash = $1
-		FOR UPDATE
+		FOR UPDATE OF rt
 	`, tokenHash).Scan(
 		&refreshID,
 		&userID,
@@ -61,37 +74,38 @@ func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 		&revokedAt,
 		&email,
 		&verified,
+		&appID,
+		&orgID,
+		&role,
 	)
 
 	if err == pgx.ErrNoRows {
-		// Reuse attempt or invallid token -> revoke al token defensively
-		_, _ = tx.Exec(ctx,`
-			UPDATE refresh_tokens
-			SET revoked_at = now()
-			WHERE token_hash = $1
-		`, tokenHash)
-
-		http.Error(w, "Inavlid Token", http.StatusUnauthorized)
+		http.Error(w, "Invalid Token", http.StatusUnauthorized)
 		return
 	}
-
 	if err != nil {
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 		return
 	}
 
-	// Check Expiry or revocation
+	if appID != app.ID {
+		http.Error(w, "Invalid Token", http.StatusUnauthorized)
+		return
+	}
+
+	// Reuse of a revoked token, or an expired one: revoke the user's sessions.
 	if revokedAt != nil || time.Now().After(expiresAt) {
 		_, _ = tx.Exec(ctx, `
-				UPDATE refresh_tokens
-				SET revoked_at now()
-				WHERE userID = $1
+			UPDATE refresh_tokens
+			SET revoked_at = now()
+			WHERE user_id = $1
+			  AND revoked_at IS NULL
 		`, userID)
 		http.Error(w, "Invalid Token", http.StatusUnauthorized)
 		return
 	}
 
-	// Roteate: revoke old token
+	// Rotate: revoke old token.
 	_, err = tx.Exec(ctx, `
 		UPDATE refresh_tokens
 		SET revoked_at = now()
@@ -102,7 +116,6 @@ func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issue new RefreshToken
 	newPlain, newHash, err := GenerateToken()
 	if err != nil {
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
@@ -110,32 +123,38 @@ func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err = tx.Exec(ctx, `
-				INSERT INTO refresh_tokens (
-						id, user_id, token_hash, expires_at
-				) VALUES ($1, $2, $3, now() + interval '30 days')
+		INSERT INTO refresh_tokens (
+			id, user_id, token_hash, expires_at
+		) VALUES ($1, $2, $3, now() + interval '30 days')
 	`, uuid.New(), userID, newHash)
 	if err != nil {
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 		return
 	}
 
-	// Issue new accessToken
-	accessToken, err := h.JWTIssuer.IssueAccessToken(
-		userID,
-		email,
-		verified,
-	)
+	accessToken, err := h.JWTIssuer.IssueAccessToken(AccessTokenClaims{
+		UserID:        userID,
+		Email:         email,
+		EmailVerified: verified,
+		AppID:         appID,
+		OrgID:         orgID,
+		Role:          store.Role(role),
+	})
 	if err != nil {
 		http.Error(w, "Internal Error", http.StatusInternalServerError)
 		return
 	}
 
-	resp := RefreshTokenResponse{
-		AccessToken: accessToken,
-		RefreshToken: newPlain,
-		ExpiresIn: AccessTokenTTLSeconds,
+	if err := tx.Commit(ctx); err != nil {
+		http.Error(w, "Internal Error", http.StatusInternalServerError)
+		return
 	}
 
+	resp := RefreshTokenResponse{
+		AccessToken:  accessToken,
+		RefreshToken: newPlain,
+		ExpiresIn:    AccessTokenTTLSeconds,
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

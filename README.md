@@ -1,273 +1,301 @@
 # Auth Service (Go + PostgreSQL)
 
-A standalone **Authentication & Identity Provider (IdP)** built in Go, designed to be reused across multiple applications.
+A multi-tenant authentication and identity provider built in Go. It is shared
+across multiple business apps, with organizations and org-scoped roles under
+each app.
 
-This service provides:
-- User registration & email verification
-- Secure login with JWT (RS256)
-- Refresh token rotation
-- Logout (single & all sessions)
-- Forgot / reset password
-- Rate limiting
-- SMTP / AWS SES email delivery
-- JWKS for public key discovery
+## Features
 
-It is **stateless for access tokens**, **stateful for refresh tokens**, and **secure by default**.
+- Per-app users, organizations, and memberships
+- App authentication via `X-App-Key` (backend-to-auth only)
+- JWT access tokens (RS256, per-app `aud`) with `org` and `role` claims
+- Refresh token rotation with reuse detection
+- Email verification, password reset, logout (single and all sessions)
+- Public JWKS for local token verification
+- Signing keys persisted in PostgreSQL and encrypted at rest
+- Rate limiting keyed by app + client IP
+- Server-rendered admin portal with cookie sessions and CSRF protection
+- SMTP email delivery
 
----
+## Architecture
 
-## Architecture Overview
-┌──────────────┐
-│ Client Apps │
-│ (Web / API) │
-└──────┬───────┘
-│ JWT (Bearer)
-▼
-┌────────────────────┐
-│ Auth Service │
-│ (Go + Chi) │
-│ │
-│ - JWT Issuer │
-│ - JWKS endpoint │
-│ - Rate limiting │
-│ - Email sender │
-└──────┬─────────────┘
-│
-▼
-┌────────────────────┐
-│ PostgreSQL (Auth) │
-│ - users │
-│ - emails │
-│ - refresh tokens │
-│ - reset tokens │
-└────────────────────┘
+```
+Browser ──JWT──▶ Business backend ──X-App-Key──▶ Auth service ──▶ PostgreSQL
+                        │
+                        └──verifies JWT locally via JWKS
+```
 
+The browser never calls the auth service directly. The business backend holds
+the appkey and proxies auth calls. Access tokens are minted per app and handed
+to the browser; the backend validates them against the public JWKS.
 
----
+### Tenancy model
 
-## Core Design Principles
+```
+apps → organizations → memberships (users)
+```
 
-- **Asymmetric JWT signing (RS256)**
-- **No shared secrets** with application services
-- **Hashed tokens only** stored in DB
-- **No user / email enumeration**
-- **Single-use refresh tokens**
-- **Key rotation supported**
-- **Provider-agnostic email layer**
+- Users are per-app. The same human in two apps is two accounts.
+- Emails are unique per `(app_id, email)`.
+- The appkey is a static secret generated on app creation. It is stored as a
+  SHA-256 hash, shown once, and sent by backends as `X-App-Key`.
+- Platform admins are `users` with `app_id NULL` and `is_platform_admin = true`.
 
----
+### Roles
 
-## Base URL
-/auth/v1
+| Role | Scope | Notes |
+|---|---|---|
+| Platform admin | All apps | Creates apps, orgs, first SUPERADMIN |
+| SUPERADMIN | One organization | Full control of the org |
+| ADMIN | One organization | Manages CLERKs |
+| CLERK | One organization | Regular worker |
 
+## Calling the API
 
+Every `/auth/v1/*` endpoint requires the app key:
 
----
+```
+X-App-Key: <appkey>
+```
 
-## Authentication Model
+Public exceptions: `GET /health` and
+`GET /auth/v1/.well-known/jwks.json`.
 
-### Access Tokens
-- JWT (RS256)
-- Short-lived (15 min)
-- Stateless
-- Verified via JWKS
+### Register (backend only)
 
-### Refresh Tokens
-- Opaque
-- Stored hashed in DB
-- Rotated on every use
-- Revoked on logout / password reset
-
----
-
-## Public Endpoints (No Auth Required)
-
-### Register
+```http
 POST /auth/v1/register
-```json
-{
-  "email": "user@example.com",
-  "password": "StrongPassword123!"
-}
-```
-Response
-```json
-{
-  "message": "Registration successful. Please verify your email."
-}
+X-App-Key: <appkey>
+Content-Type: application/json
+
+{"email": "user@example.com", "password": "StrongPassword123!"}
 ```
 
-### Verify Email
+Returns `202`. The user receives a verification link built from the app's
+`base_url`. Registering does not grant access: a membership is required before
+login succeeds.
+
+### Verify email
+
+```http
 POST /auth/v1/email/verify
-```json
-{
-  "token": "verification-token"
-}
+{"token": "<verification-token>"}
 ```
 
-### Resend Verification Email
+### Resend verification
+
+```http
 POST /auth/v1/email/resend
-```json
-{
-  "email": "user@example.com"
-}
+{"email": "user@example.com"}
 ```
 
 ### Login
+
+```http
 POST /auth/v1/login
-```json
-{
-  "email": "user@example.com",
-  "password": "StrongPassword123!"
-}
+{"email": "user@example.com", "password": "StrongPassword123!"}
 ```
-Response
+
 ```json
 {
-  "access_token": "jwt",
-  "refresh_token": "opaque",
+  "access_token": "<jwt>",
+  "refresh_token": "<opaque>",
   "expires_in": 900
 }
 ```
 
-### Refresh Token 
+Login fails with `403` when the user has no organization membership.
+
+### Refresh
+
+```http
 POST /auth/v1/token/refresh
-```json
-{
-  "refresh_token": "opaque"
-}
+{"refresh_token": "<opaque>"}
 ```
 
-### Forgot Password
-```json
+Refresh tokens are single-use and rotated on every call. Reusing a revoked
+token revokes the user's sessions.
+
+### Forgot / reset password
+
+```http
 POST /auth/v1/password/forgot
-{
-  "email": "user@example.com"
-}
+{"email": "user@example.com"}
 ```
 
-### Reset Password
+```http
 POST /auth/v1/password/reset
-```json
-{
-  "token": "reset-token",
-  "new_password": "NewStrongPass123!"
-}
+{"token": "<reset-token>", "new_password": "NewStrongPass123!"}
 ```
-### JWKS (Public Key Discovery)
-GET /auth/v1/.well-known/jwks.json
-Used by other services to verify JWT signatures.
 
+The reset link is built from the app's `base_url`.
 
-## Protected Endpoints(JWT Required)
+### Logout
 
-### Logout (All Sessions)
+```http
+POST /auth/v1/logout
+{"refresh_token": "<opaque>"}
+```
+
+### Logout all sessions
+
+```http
 POST /auth/v1/logout/all
 Authorization: Bearer <access_token>
-
-### Logout (Single Session)
-Uses refresh tojen (JWT not required)
-POST /auth/v1/logout
-```json
-{
-  "refresh_token": "opaque"
-}
 ```
 
-## JWT Claims
+### JWKS
+
+```http
+GET /auth/v1/.well-known/jwks.json
+```
+
+Public. Every non-retired signing key is published; `kid` is the RFC 7638
+thumbprint, so rotation is visible to caches immediately.
+
+## Admin portal
+
+The portal is served at `/portal` and uses server-side sessions (12h), not
+bearer tokens. It does not use `X-App-Key`. Only platform admins can sign in.
+
+| Route | Purpose |
+|---|---|
+| `GET/POST /portal/login` | platform-admin login |
+| `POST /portal/logout` | revoke the session |
+| `GET /portal` | list apps, create app (appkey shown once) |
+| `GET /portal/apps/{id}/orgs` | list/create organizations |
+| `GET /portal/orgs/{id}/users` | list/create SUPERADMIN |
+
+Bootstrap the first platform admin:
+
+```bash
+docker compose run --rm --entrypoint /app/seed auth-service \
+  -email admin@example.com -password 'change-me-please'
+```
+
+The command is idempotent for the same email. Platform admins are not scoped to
+an app (`app_id IS NULL`) and are created verified.
+
+## JWT claims
+
 ```json
 {
-  "sub": "user_id",
+  "sub": "user-uuid",
   "iss": "auth-service",
-  "aud": "your-app",
+  "aud": "app-uuid",
   "email": "user@example.com",
   "email_verified": true,
+  "org": "organization-uuid",
+  "role": "SUPERADMIN",
   "iat": 1234567890,
-  "exp": 1234569999
+  "exp": 1234568790
 }
 ```
 
-## How Other Applications Integrate
-1. Login via Auth Service
-Call /login
-Store access + refresh token
-2. Call Protected APIs
-Authorization: Bearer <access_token>
-3. Validate JWT
-Fetch JWKS from:
-/auth/v1/.well-known/jwks.json
-Cache keys
-Verify locally (no DB calls)
-4. Refresh Access Token
-Call /token/refresh when access token expires
-5. Logout
-Call /logout or /logout/all
+`aud` is the app UUID. The appkey is never placed in a token or claim.
 
+Business apps should verify `iss`, `exp`, the RS256 signature, and
+`aud == <their app UUID>`.
 
+## Rate limiting
 
-## Rate Limiting
-| Endpoint        | Limit         |
-| --------------- | ------------- |
-| Login           | 5 / min / IP  |
-| Register        | 3 / min / IP  |
-| Email resend    | 3 / min / IP  |
-| Forgot password | 3 / min / IP  |
-| Global          | 60 / min / IP |
+| Scope | Limit |
+|---|---|
+| Public routes (JWKS, health) | 60 burst / 1 req/s per IP |
+| `/auth/v1/*` global | 60 burst / 1 req/s per (app, client IP) |
+| Login | 5 / min per (app, client IP) |
+| Register | 3 / min per (app, client IP) |
+| Email verify/resend | 3 / min per (app, client IP) |
 
+`X-Forwarded-For` is honoured only when the immediate peer is listed in
+`TRUSTED_PROXIES`; the header is walked right to left, skipping trusted hops.
 
-## Email Delivery
-Local / Dev
-- Gmail SMTP (App Password)
-- From must match Gmail account
+## Environment variables
 
-Production
-- AWS SES (recommended)
-- Domain-verified sender
-- IAM-based auth
-- Email failures never block auth flows.
-
-
-## Environment Variables
-\# Server
-HTTP_PORT=8080
+```bash
+# Server
 APP_ENV=development
+HTTP_PORT=8080
 
-\# Database
-DATABASE_URL=postgres://auth_user:password@localhost:5432/auth_db?sslmode=disable
+# Database
+DATABASE_URL=postgres://auth_user:auth_password@localhost:5430/auth_db?sslmode=disable
 
-\# SMTP (local)
+# Required: base64-encoded 32-byte key used to encrypt signing keys at rest
+JWT_KEK=<base64 32 bytes>
+
+# Optional: comma-separated IPs/CIDRs allowed to set X-Forwarded-For
+TRUSTED_PROXIES=10.0.0.0/8
+
+# SMTP
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=your@gmail.com
 SMTP_PASS=app-password
 SMTP_FROM=your@gmail.com
+```
 
-# AWS SES (prod)
-AWS_REGION=us-east-1
+Generate a KEK with: `openssl rand -base64 32`.
 
+## Running locally
 
-## Running Locally 
-### Start DB 
-docker compose up -d
-### Run Auth Service
-go run ./cmd/server
-### Health Check
-curl http://localhost:8080/health
+```bash
+docker compose up --build -d
+```
 
+Migrations run automatically at service startup and are recorded in
+`schema_migrations`. There is no separate `init.sql`; the migration files are
+the single source of truth. An existing database created before migrations were
+introduced must be recreated (`docker compose down -v`) or baselined manually.
 
-## Security Notes
-Passwords: Argon2id
-Tokens: SHA-256 hashed
-JWT: RS256
-No plaintext secrets in DB
-No user enumeration
-Email delivery is non-blocking
+Health check:
 
+```bash
+curl http://localhost:8082/health
+```
 
-## Recommended Production Hardening (Future goals)
-Persist signing keys (KMS / Vault)
-Redis-backed rate limiting
-Audit logs
-Account lockout on repeated failures
-HTML email templates
-Background email queue
+## Migrations
+
+SQL files live in `migrations/` and are embedded into the binary. The runner
+applies unapplied files in filename order, one transaction each, under a
+Postgres advisory lock.
+
+```bash
+docker compose exec authbyaliendb psql -U auth_user -d auth_db -c '\dt'
+```
+
+## Deployment
+
+Production uses a separate compose file and host-level nginx:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+See [deploy/README.md](deploy/README.md) for image builds, nginx/TLS, the
+platform-admin seed, backups and firewall rules.
+
+## Tests
+
+The runtime image has no Go toolchain. Run tests with a throwaway container:
+
+```bash
+docker run --rm -v "$PWD":/src -w /src \
+  -v authservice-go-mod:/go/pkg/mod \
+  golang:1.25-alpine sh -c "go build ./... && go test ./..."
+```
+
+## Security notes
+
+- Passwords: Argon2id
+- Refresh and reset tokens: opaque, SHA-256 hashed at rest
+- App keys: 32 random bytes, SHA-256 hashed at rest, shown once
+- Signing keys: persisted in the database, AES-GCM encrypted with `JWT_KEK`
+- JWT: RS256, short-lived (15 min), per-app audience
+- No user or email enumeration on registration/reset endpoints
+
+## Roadmap
+
+- Invites and role management
+- Audit logging
+- Redis-backed rate limiting
+- KMS/Vault for signing keys

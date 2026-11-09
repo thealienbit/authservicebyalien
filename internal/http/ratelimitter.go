@@ -8,54 +8,72 @@ import (
 	"golang.org/x/time/rate"
 )
 
-type IPRateLimiter struct {
-	limiters map[string]*rate.Limiter
+const (
+	limiterCleanupInterval = 5 * time.Minute
+	limiterTTL             = 10 * time.Minute
+)
+
+// KeyedRateLimiter keeps one bucket per key. Keys are derived from the request
+// (client IP, or app + client IP) by RateLimitMiddleware.
+type KeyedRateLimiter struct {
 	mu       sync.Mutex
+	limiters map[string]*limiterEntry
 	rate     rate.Limit
 	burst    int
 }
 
-func NewIPRateLimiter(r rate.Limit, b int) *IPRateLimiter {
-	rl := &IPRateLimiter{
-		limiters: make(map[string]*rate.Limiter),
+type limiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+func NewKeyedRateLimiter(r rate.Limit, b int) *KeyedRateLimiter {
+	l := &KeyedRateLimiter{
+		limiters: make(map[string]*limiterEntry),
 		rate:     r,
-		burst:   b,
+		burst:    b,
 	}
 
-	// Cleanup goroutine
-	go func() {
-		for {
-			time.Sleep(5 * time.Minute)
-			rl.mu.Lock()
-			for ip, limiter := range rl.limiters {
-				if limiter.Allow() {
-					delete(rl.limiters, ip)
-				}
+	go l.cleanup()
+
+	return l
+}
+
+func (l *KeyedRateLimiter) cleanup() {
+	ticker := time.NewTicker(limiterCleanupInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		cutoff := time.Now().Add(-limiterTTL)
+
+		l.mu.Lock()
+		for key, entry := range l.limiters {
+			if entry.lastSeen.Before(cutoff) {
+				delete(l.limiters, key)
 			}
-			rl.mu.Unlock()
 		}
-	}()
-
-	return rl
-}
-
-func (i *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-
-	limiter, exists := i.limiters[ip]
-	if !exists {
-		limiter = rate.NewLimiter(i.rate, i.burst)
-		i.limiters[ip] = limiter
+		l.mu.Unlock()
 	}
-	return limiter
 }
 
-func RateLimitMiddleware(limiter *IPRateLimiter) func(http.Handler) http.Handler {
+func (l *KeyedRateLimiter) limiter(key string) *rate.Limiter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	entry, ok := l.limiters[key]
+	if !ok {
+		entry = &limiterEntry{limiter: rate.NewLimiter(l.rate, l.burst)}
+		l.limiters[key] = entry
+	}
+	entry.lastSeen = time.Now()
+
+	return entry.limiter
+}
+
+func RateLimitMiddleware(limiter *KeyedRateLimiter, keyFn func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := ClientIP(r)
-			if !limiter.getLimiter(ip).Allow() {
+			if !limiter.limiter(keyFn(r)).Allow() {
 				http.Error(w, "too many requests", http.StatusTooManyRequests)
 				return
 			}
@@ -63,4 +81,3 @@ func RateLimitMiddleware(limiter *IPRateLimiter) func(http.Handler) http.Handler
 		})
 	}
 }
-

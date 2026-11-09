@@ -5,6 +5,8 @@ import (
 	"errors"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/thealienbit/authservicebyalien/internal/signing"
 )
 
 type JWTVerifier struct {
@@ -16,7 +18,7 @@ type JWTVerifier struct {
 func NewJWTVerifier(
 	issuer string,
 	audience string,
-	signingKeys []*SigningKey,
+	signingKeys []*signing.Key,
 ) *JWTVerifier {
 
 	keys := make(map[string]*rsa.PublicKey)

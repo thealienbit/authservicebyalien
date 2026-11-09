@@ -5,51 +5,55 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+
+	"github.com/thealienbit/authservicebyalien/internal/signing"
+	"github.com/thealienbit/authservicebyalien/internal/store"
 )
 
+const AccessTokenTTLSeconds = 900
+
 type JWTIssuer struct {
-	Issuer string
-	Audience string
-	SigningKey *SigningKey
+	Issuer     string
+	SigningKey *signing.Key
 }
 
-func NewJWTIssuer(issuer, audience string, key *SigningKey) (*JWTIssuer, error) {
-	if err := vaidateKey(key); err != nil {
+type AccessTokenClaims struct {
+	UserID        uuid.UUID
+	Email         string
+	EmailVerified bool
+	AppID         uuid.UUID
+	OrgID         uuid.UUID
+	Role          store.Role
+}
+
+func NewJWTIssuer(issuer string, key *signing.Key) (*JWTIssuer, error) {
+	if err := key.Validate(); err != nil {
 		return nil, err
 	}
 
 	return &JWTIssuer{
-		Issuer: issuer,
-		Audience: audience,
+		Issuer:     issuer,
 		SigningKey: key,
 	}, nil
 }
 
-
-func (j *JWTIssuer) IssueAccessToken(
-	userID uuid.UUID,
-	email string,
-	emailVerified bool,
-) (string, error) {
-
+func (j *JWTIssuer) IssueAccessToken(claims AccessTokenClaims) (string, error) {
 	now := time.Now()
 
-
-	claims := jwt.MapClaims{
-		"sub":            userID.String(),
+	mapClaims := jwt.MapClaims{
+		"sub":            claims.UserID.String(),
 		"iss":            j.Issuer,
-		"aud":            j.Audience,
-		"email":          email,
-		"email_verified": emailVerified,
+		"aud":            claims.AppID.String(),
+		"email":          claims.Email,
+		"email_verified": claims.EmailVerified,
+		"org":            claims.OrgID.String(),
+		"role":           string(claims.Role),
 		"iat":            now.Unix(),
-		"exp":            now.Add(15 * time.Minute).Unix(),
+		"exp":            now.Add(AccessTokenTTLSeconds * time.Second).Unix(),
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, mapClaims)
 	token.Header["kid"] = j.SigningKey.KeyID
 
 	return token.SignedString(j.SigningKey.PrivateKey)
 }
-
-
-const AccessTokenTTLSeconds = 900

@@ -19,14 +19,23 @@ func JWTMiddleware(verifier *JWTVerifier) func(http.Handler) http.Handler {
 			// Expect: "Bearer <token>"
 			tokenString := authHeader[7:]
 
+			options := []jwt.ParserOption{
+				jwt.WithIssuer(verifier.Issuer),
+				jwt.WithValidMethods([]string{"RS256"}),
+				jwt.WithExpirationRequired(),
+			}
+			// Tokens are audiences per app. Auth's own endpoints only need the
+			// subject, so audience validation is opt-in (empty = skip).
+			if verifier.Audience != "" {
+				options = append(options, jwt.WithAudience(verifier.Audience))
+			}
+
 			claims := jwt.MapClaims{}
 			token, err := jwt.ParseWithClaims(
 				tokenString,
 				claims,
 				verifier.keyFunc,
-				jwt.WithAudience(verifier.Audience),
-				jwt.WithIssuer(verifier.Issuer),
-				jwt.WithValidMethods([]string{"RS256"}),
+				options...,
 			)
 
 			if err != nil || !token.Valid {
@@ -42,16 +51,19 @@ func JWTMiddleware(verifier *JWTVerifier) func(http.Handler) http.Handler {
 
 			email, _ := claims["email"].(string)
 			emailVerified, _ := claims["email_verified"].(bool)
+			orgID, _ := claims["org"].(string)
+			role, _ := claims["role"].(string)
 
 			ctx := WithAuthContext(
 				r.Context(),
 				userID,
 				email,
 				emailVerified,
+				orgID,
+				role,
 			)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
-
