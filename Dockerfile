@@ -1,6 +1,12 @@
 
 # ---- build stage ----
-FROM golang:1.25-alpine AS builder
+# Cross-compile natively on the builder arch (no QEMU): buildx sets
+# TARGETOS/TARGETARCH to the --platform platform.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+ENV GOOS=$TARGETOS GOARCH=$TARGETARCH
 
 WORKDIR /app
 
